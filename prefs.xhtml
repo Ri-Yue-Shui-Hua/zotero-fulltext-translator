@@ -1,0 +1,131 @@
+<groupbox id="ftt-grp-ollama">
+  <label><html:h2>Ollama 与模型</html:h2></label>
+  <hbox align="center">
+    <label value="Ollama 服务地址" style="min-width: 120px" />
+    <html:input id="ftt-ollamaUrl" type="text" flex="1" style="flex: 1"
+                preference="extensions.zotero.ftt.ollamaUrl"
+                placeholder="http://127.0.0.1:11434" />
+  </hbox>
+  <hbox align="center">
+    <label value="模型名称" style="min-width: 120px" />
+    <html:input id="ftt-model" type="text" flex="1" style="flex: 1"
+                preference="extensions.zotero.ftt.model" placeholder="qwen3.5:4b" />
+  </hbox>
+  <hbox align="center">
+    <label value="Python 路径（可选）" style="min-width: 120px" />
+    <html:input id="ftt-pythonPath" type="text" flex="1" style="flex: 1"
+                preference="extensions.zotero.ftt.pythonPath"
+                placeholder="留空则自动查找 python3 / python" />
+    <button label="浏览…" data-ftt-action="pick" data-ftt-input="ftt-pythonPath" data-ftt-kind="file" />
+  </hbox>
+</groupbox>
+
+<groupbox id="ftt-grp-output">
+  <label><html:h2>字体与输出</html:h2></label>
+  <hbox align="center">
+    <label value="中文字体文件" style="min-width: 120px" />
+    <html:input id="ftt-fontPath" type="text" flex="1" style="flex: 1"
+                preference="extensions.zotero.ftt.fontPath"
+                placeholder="如 NotoSansSC-Regular.otf；留空自动查找系统字体" />
+    <button label="浏览…" data-ftt-action="pick" data-ftt-input="ftt-fontPath" data-ftt-kind="font" />
+  </hbox>
+  <hbox align="center">
+    <label value="粗体字体（可选）" style="min-width: 120px" />
+    <html:input id="ftt-boldFontPath" type="text" flex="1" style="flex: 1"
+                preference="extensions.zotero.ftt.boldFontPath"
+                placeholder="用于标题等粗体段落；留空则与常规字体相同" />
+    <button label="浏览…" data-ftt-action="pick" data-ftt-input="ftt-boldFontPath" data-ftt-kind="font" />
+  </hbox>
+  <hbox align="center">
+    <label value="PDF 输出目录" style="min-width: 120px" />
+    <html:input id="ftt-outputDir" type="text" flex="1" style="flex: 1"
+                preference="extensions.zotero.ftt.outputDir"
+                placeholder="留空则使用 Zotero 数据目录下的 translated-pdfs" />
+    <button label="浏览…" data-ftt-action="pick" data-ftt-input="ftt-outputDir" data-ftt-kind="folder" />
+  </hbox>
+  <hbox align="center">
+    <label value="结果处理" style="min-width: 120px" />
+    <menulist preference="extensions.zotero.ftt.attachMode">
+      <menupopup>
+        <menuitem label="作为子附件导入 Zotero（复制一份到存储）" value="import" />
+        <menuitem label="作为链接附件（只引用输出目录中的文件）" value="link" />
+        <menuitem label="只保存文件，不加入 Zotero" value="none" />
+      </menupopup>
+    </menulist>
+  </hbox>
+  <checkbox label="翻译完成后自动打开译文" preference="extensions.zotero.ftt.openAfter" />
+</groupbox>
+
+<groupbox id="ftt-grp-mode">
+  <label><html:h2>翻译模式与版式保留</html:h2></label>
+  <hbox align="center">
+    <label value="翻译模式" style="min-width: 120px" />
+    <menulist preference="extensions.zotero.ftt.mode">
+      <menupopup>
+        <menuitem label="原位替换：译文覆盖原文，版式不变" value="replace" />
+        <menuitem label="双语对照：每页「原文页 + 译文页」交替" value="bilingual" />
+      </menupopup>
+    </menulist>
+  </hbox>
+  <hbox align="center">
+    <label value="擦除原文的背景" style="min-width: 120px" />
+    <menulist preference="extensions.zotero.ftt.bgFill">
+      <menupopup>
+        <menuitem label="自动取色（保留彩色底、图表底色）" value="auto" />
+        <menuitem label="纯白填充" value="white" />
+        <menuitem label="不填充（只删除文字，保留底层图形）" value="none" />
+      </menupopup>
+    </menulist>
+  </hbox>
+  <hbox align="center">
+    <label value="最小字号比例 (%)" style="min-width: 120px" />
+    <html:input id="ftt-minFontPercent" type="number" min="40" max="100" step="5"
+                preference="extensions.zotero.ftt.minFontPercent" style="width: 80px" />
+    <label value="译文放不下时，最多缩小到原字号的该比例" />
+  </hbox>
+  <checkbox label="统一正文字号与缩放（推荐）：全文正文使用同一字号，标题/脚注保持原有层级"
+            preference="extensions.zotero.ftt.unifyFont" />
+  <checkbox label="保护行内公式（用占位符保留，不交给模型翻译）"
+            preference="extensions.zotero.ftt.protectFormulas" />
+  <checkbox label="翻译图表标题（Figure / Table 说明）"
+            preference="extensions.zotero.ftt.translateCaptions" />
+  <checkbox label="翻译表格单元格（表头、行标签；纯数字与全大写缩写保持原样）"
+            preference="extensions.zotero.ftt.translateTableCells" />
+  <checkbox label="跳过参考文献（从 References 标题起，遇到 Appendix 恢复）"
+            preference="extensions.zotero.ftt.skipReferences" />
+  <checkbox label="跳过页眉页脚（页码、期刊名等短文本）"
+            preference="extensions.zotero.ftt.skipHeaderFooter" />
+</groupbox>
+
+<groupbox id="ftt-grp-advanced">
+  <label><html:h2>高级</html:h2></label>
+  <hbox align="center">
+    <label value="页码范围" style="min-width: 120px" />
+    <html:input id="ftt-pageRange" type="text" style="width: 160px"
+                preference="extensions.zotero.ftt.pageRange" placeholder="空=全部，如 1-3,5" />
+  </hbox>
+  <hbox align="center">
+    <label value="补充提示词/术语" style="min-width: 120px" />
+    <html:input id="ftt-extraPrompt" type="text" flex="1" style="flex: 1"
+                preference="extensions.zotero.ftt.extraPrompt"
+                placeholder="例：attention 译为「注意力」；token 保留英文" />
+  </hbox>
+  <checkbox label="输出诊断文件（译文旁生成 .debug.json；反馈排版问题时请一并提供）"
+            preference="extensions.zotero.ftt.debug" />
+  <hbox align="center">
+    <label value="单次请求超时 (秒)" style="min-width: 120px" />
+    <html:input id="ftt-timeoutSec" type="number" min="30" max="3600" step="30"
+                preference="extensions.zotero.ftt.timeoutSec" style="width: 80px" />
+    <label value="批量字符数" style="margin-inline-start: 16px" />
+    <html:input id="ftt-batchChars" type="number" min="400" max="6000" step="200"
+                preference="extensions.zotero.ftt.batchChars" style="width: 80px" />
+  </hbox>
+</groupbox>
+
+<groupbox id="ftt-grp-check">
+  <label><html:h2>环境检测</html:h2></label>
+  <hbox align="center">
+    <button label="检测 Python / 字体 / Ollama / 模型" data-ftt-action="test" />
+  </hbox>
+  <html:pre id="ftt-test-output" style="white-space: pre-wrap; user-select: text; margin: 6px 0 0 0;"></html:pre>
+</groupbox>

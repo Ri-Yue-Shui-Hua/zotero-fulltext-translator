@@ -1,0 +1,15 @@
+{
+  "manifest_version": 2,
+  "name": "Fulltext Translator (Ollama)",
+  "version": "0.1.5",
+  "description": "用本地 Ollama 大模型翻译论文全文，并尽可能保留原始版式，输出中文 PDF。",
+  "author": "you",
+  "applications": {
+    "zotero": {
+      "id": "fulltext-translator@local.example",
+      "strict_min_version": "6.999",
+      "strict_max_version": "10.*",
+      "update_url": "https://example.invalid/fulltext-translator/update.json"
+    }
+  }
+}
