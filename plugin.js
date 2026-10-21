@@ -142,6 +142,12 @@ var FTT = {
       itemMenu.appendChild(
         mk("ftt-itemmenu-translate", "翻译全文为中文 PDF（Ollama）", () => this.run(win, "selection"))
       );
+      itemMenu.appendChild(
+        mk("ftt-itemmenu-compare", "并排查看原文与译文", () => this.openComparison(win, "selection"))
+      );
+      itemMenu.appendChild(
+        mk("ftt-itemmenu-summary", "生成论文总结到笔记", () => this.summarize(win, "selection"))
+      );
     }
 
     // 工具菜单：翻译当前打开的论文 / 取消 / 打开设置
@@ -153,6 +159,12 @@ var FTT = {
       tools.appendChild(sep);
       tools.appendChild(
         mk("ftt-tools-translate", "翻译当前论文全文（Ollama）", () => this.run(win, "reader"))
+      );
+      tools.appendChild(
+        mk("ftt-tools-compare", "并排查看当前论文原文与译文", () => this.openComparison(win, "reader"))
+      );
+      tools.appendChild(
+        mk("ftt-tools-summary", "生成当前论文总结到笔记", () => this.summarize(win, "reader"))
       );
       tools.appendChild(mk("ftt-tools-cancel", "取消正在进行的全文翻译", () => this.cancel()));
       tools.appendChild(
@@ -244,6 +256,221 @@ var FTT = {
       const ok = await this.translateOne(att, win);
       if (ok === "cancelled") break;
     }
+  },
+
+  async findTranslationPair(item) {
+    let original = null;
+    let translated = null;
+    if (item.isPDFAttachment()) {
+      if (this.isTranslated(item)) translated = item;
+      else original = item;
+    } else if (item.isRegularItem()) {
+      original = await this.pickPdf(item);
+    }
+
+    const parent = item.parentItemID
+      ? Zotero.Items.get(item.parentItemID)
+      : item.isRegularItem()
+        ? item
+        : null;
+    if (!parent) return null;
+    if (!original) original = await this.pickPdf(parent);
+
+    for (const id of parent.getAttachments()) {
+      const attachment = Zotero.Items.get(id);
+      if (attachment && attachment.isPDFAttachment() && this.isTranslated(attachment)) {
+        translated = attachment;
+        break;
+      }
+    }
+    if (!original || !translated) return null;
+    return { original, translated };
+  },
+
+  async openComparison(win, prefer) {
+    let targets;
+    try {
+      targets = await this.collectTargets(win, prefer);
+      if (!targets.length && prefer === "reader") {
+        const current = this.getReaderAttachment(win);
+        if (current) targets = [current];
+      }
+      if (targets.length !== 1) {
+        throw new Error(targets.length ? "请一次只选择一篇论文。" : "请选中论文条目或打开一份论文 PDF。");
+      }
+      const pair = await this.findTranslationPair(targets[0]);
+      if (!pair) {
+        throw new Error("未找到对应译文 PDF。请先完成翻译，并将译文作为 Zotero 子附件导入。");
+      }
+
+      const originalReader = await Zotero.Reader.open(pair.original.id, null, { openInWindow: true });
+      const translatedReader = await Zotero.Reader.open(pair.translated.id, null, { openInWindow: true });
+      if (originalReader && originalReader._initPromise) await originalReader._initPromise;
+      if (translatedReader && translatedReader._initPromise) await translatedReader._initPromise;
+      const originalWindow = originalReader && originalReader._window;
+      const translatedWindow = translatedReader && translatedReader._window;
+      if (!originalWindow || !translatedWindow || originalWindow === translatedWindow) {
+        throw new Error("Zotero 已尝试打开两份 PDF，但无法取得两个独立阅读器窗口以自动并排排列。");
+      }
+
+      const screen = originalWindow.screen;
+      if (!screen || !Number.isFinite(screen.availWidth) || !Number.isFinite(screen.availHeight)) {
+        throw new Error("无法读取屏幕可用尺寸，不能自动排列阅读器窗口。");
+      }
+      const left = screen.availLeft || 0;
+      const top = screen.availTop || 0;
+      const width = Math.floor(screen.availWidth / 2);
+      const height = screen.availHeight;
+      originalWindow.resizeTo(width, height);
+      translatedWindow.resizeTo(width, height);
+      originalWindow.moveTo(left, top);
+      translatedWindow.moveTo(left + width, top);
+    } catch (e) {
+      this.log("openComparison failed: " + (e.stack || e));
+      this.alert("原文与译文", this.explain(e), win);
+    }
+  },
+
+  async summarize(win, prefer) {
+    if (this._job) {
+      this.alert("论文总结", "已有任务正在进行。请等待完成或先取消当前任务。", win);
+      return;
+    }
+    let targets;
+    try {
+      targets = await this.collectTargets(win, prefer);
+    } catch (e) {
+      this.alert("论文总结", "无法确定要总结的论文：" + e, win);
+      return;
+    }
+    if (!targets.length) {
+      this.alert("论文总结", "没有找到可总结的 PDF。请选中带 PDF 的论文条目或在阅读器中打开论文。", win);
+      return;
+    }
+    if (targets.some((att) => !att.parentItemID)) {
+      this.alert("论文总结", "请先将 PDF 添加到一个 Zotero 论文条目下，才能把总结保存为该条目的笔记。", win);
+      return;
+    }
+    for (const att of targets) {
+      await this.summarizeOne(att, win);
+    }
+  },
+
+  async summarizeOne(att, win) {
+    const parent = Zotero.Items.get(att.parentItemID);
+    const title = (parent && parent.getDisplayTitle()) || att.getDisplayTitle() || "未命名论文";
+    const pw = new Zotero.ProgressWindow({ closeOnClick: true });
+    pw.changeHeadline("论文总结");
+    const prog = new pw.ItemProgress(att.getImageSrc ? att.getImageSrc() : "", title);
+    prog.setProgress(0);
+    pw.show();
+
+    const job = { cancelled: false, proc: null };
+    this._job = job;
+    let cfgPath = null;
+    try {
+      const inPath = await att.getFilePathAsync();
+      if (!inPath) {
+        throw this.err("E_NOFILE", "附件文件不存在（可能尚未同步下载），请先在 Zotero 中打开一次该 PDF。");
+      }
+      if (!this.enginePath) await this.deployEngine();
+      const py = await this.findPython();
+      const cfg = this.buildConfig(inPath, "", att.key);
+      cfg.title = title;
+      cfgPath = PathUtils.join(this.workDir, "summary-" + Date.now() + ".json");
+      await IOUtils.writeUTF8(cfgPath, JSON.stringify(cfg));
+
+      let summaryEvent = null;
+      let errEvent = null;
+      const result = await this.runEngine(py, cfgPath, ["--summarize"], job, (ev) => {
+        if (ev.type === "progress") {
+          prog.setProgress(Math.min(95, Math.round((ev.page / ev.total) * 95)));
+          prog.setText(`${title} — ${ev.message}`);
+        } else if (ev.type === "log") {
+          this.log("engine: " + ev.message);
+        } else if (ev.type === "summary") {
+          summaryEvent = ev;
+        } else if (ev.type === "error") {
+          errEvent = ev;
+        }
+      });
+
+      if (job.cancelled) {
+        prog.setError();
+        prog.setText(`${title} — 已取消`);
+        pw.startCloseTimer(4000);
+        return;
+      }
+      if (errEvent) throw this.err(errEvent.code, errEvent.message, errEvent.trace);
+      if (result.exitCode !== 0 || !summaryEvent || !summaryEvent.text) {
+        throw this.err("E_SUMMARY", "总结引擎异常退出（exit " + result.exitCode + "）。\n" + result.tail.slice(-8).join("\n"));
+      }
+
+      const note = new Zotero.Item("note");
+      note.libraryID = parent.libraryID;
+      note.parentID = parent.id;
+      note.setNote("<h1>论文总结</h1>\n" + this.summaryToHTML(summaryEvent.text));
+      await note.saveTx();
+
+      prog.setProgress(100);
+      prog.setText(`${title} — 总结已保存到笔记`);
+      pw.startCloseTimer(7000);
+    } catch (e) {
+      this.log("summarizeOne failed: " + (e.stack || e));
+      prog.setError();
+      prog.setText(`${title} — 失败`);
+      pw.startCloseTimer(15000);
+      this.alert("生成论文总结失败", this.explain(e), win);
+    } finally {
+      this._job = null;
+      if (cfgPath) {
+        try {
+          await IOUtils.remove(cfgPath, { ignoreAbsent: true });
+        } catch (e) {
+          this.log("temporary summary config cleanup failed: " + e);
+        }
+      }
+    }
+  },
+
+  summaryToHTML(text) {
+    const escape = (value) =>
+      value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    const lines = text.split(/\r?\n/);
+    const html = [];
+    let inList = false;
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line) {
+        if (inList) {
+          html.push("</ul>");
+          inList = false;
+        }
+        continue;
+      }
+      const heading = line.match(/^#{1,3}\s+(.+)$/);
+      if (heading) {
+        if (inList) {
+          html.push("</ul>");
+          inList = false;
+        }
+        html.push("<h2>" + escape(heading[1]) + "</h2>");
+      } else if (/^(?:[-*•]|\d+[.)])\s+/.test(line)) {
+        if (!inList) {
+          html.push("<ul>");
+          inList = true;
+        }
+        html.push("<li>" + escape(line.replace(/^(?:[-*•]|\d+[.)])\s+/, "")) + "</li>");
+      } else {
+        if (inList) {
+          html.push("</ul>");
+          inList = false;
+        }
+        html.push("<p>" + escape(line) + "</p>");
+      }
+    }
+    if (inList) html.push("</ul>");
+    return html.join("\n");
   },
 
   cancel() {

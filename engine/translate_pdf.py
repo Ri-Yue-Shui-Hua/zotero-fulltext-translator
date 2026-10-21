@@ -1453,15 +1453,126 @@ def translate_pdf(cfg):
     return 0
 
 
+def split_summary_text(text, max_chars):
+    chunks = []
+    current = []
+    current_size = 0
+    for paragraph in re.split(r"\n\s*\n", text):
+        paragraph = paragraph.strip()
+        while len(paragraph) > max_chars:
+            if current:
+                chunks.append("\n\n".join(current))
+                current, current_size = [], 0
+            chunks.append(paragraph[:max_chars])
+            paragraph = paragraph[max_chars:]
+        if paragraph and current_size + len(paragraph) > max_chars and current:
+            chunks.append("\n\n".join(current))
+            current, current_size = [], 0
+        if paragraph:
+            current.append(paragraph)
+            current_size += len(paragraph) + 2
+    if current:
+        chunks.append("\n\n".join(current))
+    return chunks
+
+
+def summarize_pdf(cfg):
+    o = normalize_opts(cfg)
+    if fitz is None:
+        raise EngineError("E_NO_PYMUPDF", "Python 环境缺少 PyMuPDF，请执行：pip install pymupdf fonttools")
+    if not o["input"] or not os.path.exists(o["input"]):
+        raise EngineError("E_INPUT", "找不到输入 PDF：%s" % o["input"])
+    try:
+        doc = fitz.open(o["input"])
+    except Exception as e:  # noqa
+        raise EngineError("E_PDF_OPEN", "无法打开 PDF：%s" % e)
+    if doc.needs_pass:
+        raise EngineError("E_PDF_ENCRYPTED", "PDF 已加密，需要先解除密码。")
+
+    title = (cfg.get("title") or (doc.metadata or {}).get("title") or "未命名论文").strip()
+    pages = []
+    for page_no, page in enumerate(doc, 1):
+        text = page.get_text("text", sort=True).strip()
+        if text:
+            pages.append("【第 %d 页】\n%s" % (page_no, text))
+    doc.close()
+    if not pages:
+        raise EngineError("E_NO_TEXT", "该 PDF 没有可提取的文字层（疑似扫描件）。请先用 OCR 生成可搜索 PDF。")
+
+    client = Ollama(o["ollama_url"], o["model"], o["timeout"], o["temperature"], o["num_ctx"])
+    try:
+        client.version()
+        if not client.has_model():
+            raise EngineError("E_MODEL_MISSING", "Ollama 里没有模型 %s，请先执行：ollama pull %s" % (o["model"], o["model"]))
+    except EngineError:
+        raise
+    except Exception as e:  # noqa
+        raise EngineError("E_OLLAMA_DOWN", "无法连接 Ollama（%s）：%s" % (client.base, e))
+
+    source_chunks = split_summary_text("\n\n".join(pages), 6000)
+    partial_system = (
+        "你是一名严谨的学术论文分析助手。请用简体中文概括给定论文片段，提取研究问题、方法/数据、"
+        "主要结果、贡献与局限。忠实于原文；只总结片段明确提供的信息，不推测、不补充外部事实。"
+        "如果片段是参考文献或页眉页脚，忽略它。控制在约 700 字以内。"
+    )
+    parts = []
+    for index, chunk in enumerate(source_chunks):
+        emit("progress", page=index + 1, total=len(source_chunks),
+             message="正在分析论文内容（%d/%d）" % (index + 1, len(source_chunks)))
+        parts.append(client.chat(
+            partial_system,
+            "论文标题：%s\n请分析以下论文片段：\n\n%s" % (title, chunk),
+        ))
+
+    for _ in range(5):
+        previous_size = sum(len(part) for part in parts)
+        if previous_size <= 4500:
+            break
+        groups = split_summary_text("\n\n".join(parts), 6000)
+        reduced = []
+        for index, group in enumerate(groups):
+            emit("progress", page=index + 1, total=len(groups),
+                 message="正在整合长论文摘要（%d/%d）" % (index + 1, len(groups)))
+            reduced.append(client.chat(
+                partial_system,
+                "以下是同一篇论文不同部分的阶段性摘要。去重并保留核心信息：\n\n" + group,
+            ))
+        if not reduced or sum(len(part) for part in reduced) >= previous_size:
+            raise EngineError("E_SUMMARY", "模型未能压缩长论文摘要，请更换模型或缩小论文范围后重试。")
+        parts = reduced
+    if sum(len(part) for part in parts) > 4500:
+        raise EngineError("E_SUMMARY", "论文摘要过长，模型无法在上下文限制内完成整合。")
+
+    final_system = (
+        "你是一名严谨的学术论文阅读助手。根据提供的论文内容摘要，生成简体中文论文总结。"
+        "只陈述有依据的信息；论文没有说明的内容请写“原文未说明”，不要臆测。"
+        "使用以下 Markdown 标题组织内容：## 研究问题与目标、## 方法与数据、## 主要发现、"
+        "## 创新与贡献、## 局限与后续方向、## 一句话总结。各节简明、具体，避免重复。"
+    )
+    result = client.chat(
+        final_system,
+        "论文标题：%s\n\n以下为论文各部分的阶段性摘要，请综合成一份连贯的论文总结：\n\n%s"
+        % (title, "\n\n".join(parts)),
+    )
+    emit("summary", text=result)
+    emit("done", summary={"chunks": len(source_chunks)})
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
     ap.add_argument("--check", action="store_true")
+    ap.add_argument("--summarize", action="store_true")
     args = ap.parse_args()
     try:
         with open(args.config, "r", encoding="utf-8") as f:
             cfg = json.load(f)
-        return run_check(cfg) if args.check else translate_pdf(cfg)
+        if args.check:
+            return run_check(cfg)
+        if args.summarize:
+            return summarize_pdf(cfg)
+        return translate_pdf(cfg)
     except EngineError as e:
         emit("error", code=e.code, message=e.message)
         return 2

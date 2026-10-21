@@ -35,7 +35,7 @@ pip install -r requirements.txt     # pymupdf + fonttools
 
 ### 1.4 安装插件
 ```bash
-python tools/build_xpi.py           # 生成 dist/zotero-fulltext-translator-0.1.0.xpi
+python tools/build_xpi.py           # 按 manifest 版本生成 dist/zotero-fulltext-translator-<version>.xpi
 ```
 Zotero → 工具 → 插件 → 右上角齿轮 → **Install Plugin From File…** → 选择 xpi → 重启 Zotero。
 
@@ -49,8 +49,12 @@ Zotero → 设置 → **全文翻译 (Ollama)** → 填好地址/模型/字体 �
 ## 2. 使用
 * **条目右键** → 「翻译全文为中文 PDF（Ollama）」（可多选，逐篇排队）。
 * 正在阅读器里看论文时：**工具 → 翻译当前论文全文（Ollama）**。
+* 条目右键 → **并排查看原文与译文**：打开对应的原 PDF 和已导入的中文 PDF，并尝试将两个阅读器窗口左右排列。此功能要求译文已作为 Zotero 子附件导入。
+* 条目右键 → **生成论文总结到笔记**：用设置中的 Ollama 模型总结 PDF，并将结构化中文总结保存为该论文的 Zotero 子笔记；长论文会分块分析后再整合。阅读器打开论文时也可从「工具」菜单触发。
 * 进行中可在 **工具 → 取消正在进行的全文翻译** 中止；再次运行会命中缓存，从上次进度继续（缓存按 模型+原文 命中）。
 * 结果默认作为子附件「[中文] 标题」导入并打开；输出目录里同时保留文件。
+
+> 论文总结会将 PDF 中提取出的文字发送到设置中配置的 Ollama 地址。使用远程 Ollama 服务时，请确认论文内容可以发送到该服务。
 
 ## 3. 设置项
 | 设置 | 说明 |

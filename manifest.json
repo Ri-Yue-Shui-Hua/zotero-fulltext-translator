@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "Fulltext Translator (Ollama)",
-  "version": "0.1.5",
-  "description": "用本地 Ollama 大模型翻译论文全文，并尽可能保留原始版式，输出中文 PDF。",
+  "version": "0.1.6",
+  "description": "用 Ollama 翻译论文全文、并排对照原文与译文，并将论文总结保存到 Zotero 笔记。",
   "author": "you",
   "applications": {
     "zotero": {
