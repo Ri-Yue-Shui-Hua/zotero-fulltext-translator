@@ -1559,11 +1559,100 @@ def summarize_pdf(cfg):
     return 0
 
 
+def compare_pdfs(cfg):
+    if fitz is None:
+        raise EngineError("E_NO_PYMUPDF", "Python 环境缺少 PyMuPDF，请执行：pip install pymupdf fonttools")
+    original_path = cfg.get("input")
+    translated_path = cfg.get("translated_input")
+    out_path = cfg.get("output")
+    if not original_path or not os.path.exists(original_path):
+        raise EngineError("E_INPUT", "找不到原文 PDF：%s" % original_path)
+    if not translated_path or not os.path.exists(translated_path):
+        raise EngineError("E_INPUT", "找不到译文 PDF：%s" % translated_path)
+    if not out_path:
+        raise EngineError("E_CONFIG", "缺少对照 PDF 输出路径。")
+
+    try:
+        original = fitz.open(original_path)
+        translated = fitz.open(translated_path)
+    except Exception as e:  # noqa
+        raise EngineError("E_PDF_OPEN", "无法打开原文或译文 PDF：%s" % e)
+    if original.needs_pass or translated.needs_pass:
+        raise EngineError("E_PDF_ENCRYPTED", "原文或译文 PDF 已加密，需要先解除密码。")
+
+    source_pages = original.page_count
+    if translated.page_count == source_pages:
+        translated_indexes = list(range(source_pages))
+    elif translated.page_count == source_pages * 2:
+        translated_indexes = [index * 2 + 1 for index in range(source_pages)]
+    else:
+        raise EngineError(
+            "E_COMPARE_PAGES",
+            "原文有 %d 页，译文有 %d 页，无法建立逐页对照。" % (source_pages, translated.page_count),
+        )
+    if source_pages == 0:
+        raise EngineError("E_COMPARE_PAGES", "PDF 没有页面，无法生成对照文件。")
+
+    output = fitz.open()
+    gap = 12
+    for page_index, translated_index in enumerate(translated_indexes):
+        emit(
+            "progress",
+            page=page_index + 1,
+            total=source_pages,
+            message="正在合成第 %d/%d 组对照页" % (page_index + 1, source_pages),
+        )
+        original_page = original[page_index]
+        translated_page = translated[translated_index]
+        original_rect = original_page.rect
+        translated_rect = translated_page.rect
+        header_height = 22
+        width = original_rect.width + gap + translated_rect.width
+        height = header_height + max(original_rect.height, translated_rect.height)
+        page = output.new_page(width=width, height=height)
+        page.insert_text((8, 15), "ORIGINAL - Page %d" % (page_index + 1), fontsize=9, fontname="helv")
+        page.insert_text(
+            (original_rect.width + gap + 8, 15),
+            "TRANSLATION - Page %d" % (page_index + 1),
+            fontsize=9,
+            fontname="helv",
+        )
+        page.show_pdf_page(
+            fitz.Rect(0, header_height, original_rect.width, header_height + original_rect.height),
+            original,
+            page_index,
+            keep_proportion=False,
+        )
+        right_x = original_rect.width + gap
+        page.show_pdf_page(
+            fitz.Rect(right_x, header_height, right_x + translated_rect.width, header_height + translated_rect.height),
+            translated,
+            translated_index,
+            keep_proportion=False,
+        )
+
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    tmp = out_path + ".part"
+    try:
+        output.save(tmp, garbage=4, deflate=True)
+        os.replace(tmp, out_path)
+    except Exception as e:  # noqa
+        raise EngineError("E_SAVE", "保存原文与译文对照 PDF 失败：%s" % e)
+    finally:
+        output.close()
+        original.close()
+        translated.close()
+
+    emit("done", output=out_path, summary={"pages": source_pages})
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--summarize", action="store_true")
+    ap.add_argument("--compare", action="store_true")
     args = ap.parse_args()
     try:
         with open(args.config, "r", encoding="utf-8") as f:
@@ -1572,6 +1661,8 @@ def main():
             return run_check(cfg)
         if args.summarize:
             return summarize_pdf(cfg)
+        if args.compare:
+            return compare_pdfs(cfg)
         return translate_pdf(cfg)
     except EngineError as e:
         emit("error", code=e.code, message=e.message)

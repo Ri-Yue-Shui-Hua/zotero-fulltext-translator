@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Fulltext Translator (Ollama)",
-  "version": "0.1.6",
+  "version": "0.1.12",
   "description": "用 Ollama 翻译论文全文、并排对照原文与译文，并将论文总结保存到 Zotero 笔记。",
   "author": "you",
   "applications": {

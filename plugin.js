@@ -10,6 +10,7 @@ var FTT = {
   rootURI: null,
   PREF: "extensions.zotero.ftt.",
   TRANSLATED_PREFIX: "[中文] ",
+  COMPARISON_PREFIX: "[原译对照] ",
   workDir: null,
   enginePath: null,
   _added: new Map(), // window -> [elements]
@@ -166,7 +167,7 @@ var FTT = {
       tools.appendChild(
         mk("ftt-tools-summary", "生成当前论文总结到笔记", () => this.summarize(win, "reader"))
       );
-      tools.appendChild(mk("ftt-tools-cancel", "取消正在进行的全文翻译", () => this.cancel()));
+      tools.appendChild(      mk("ftt-tools-cancel", "取消正在进行的插件任务", () => this.cancel()));
       tools.appendChild(
         mk("ftt-tools-prefs", "全文翻译设置…", () => Zotero.Utilities.Internal.openPreferences(this.paneID))
       );
@@ -276,21 +277,84 @@ var FTT = {
     if (!parent) return null;
     if (!original) original = await this.pickPdf(parent);
 
+    const translations = [];
     for (const id of parent.getAttachments()) {
       const attachment = Zotero.Items.get(id);
       if (attachment && attachment.isPDFAttachment() && this.isTranslated(attachment)) {
-        translated = attachment;
-        break;
+        translations.push(attachment);
       }
+    }
+    if (translations.length) {
+      translations.sort((a, b) => {
+        const dateA = a.getField("dateAdded") || "";
+        const dateB = b.getField("dateAdded") || "";
+        return dateA.localeCompare(dateB) || a.id - b.id;
+      });
+      translated = translations[translations.length - 1];
     }
     if (!original || !translated) return null;
     return { original, translated };
   },
 
+  async keepLatestGeneratedAttachment(parent, prefix, keepID) {
+    const staleIDs = [];
+    for (const id of parent.getAttachments()) {
+      const attachment = Zotero.Items.get(id);
+      if (
+        attachment &&
+        attachment.id !== keepID &&
+        attachment.isPDFAttachment() &&
+        (attachment.getField("title") || "").startsWith(prefix)
+      ) {
+        staleIDs.push(attachment.id);
+      }
+    }
+    if (staleIDs.length) {
+      await Zotero.Items.trashTx(staleIDs);
+      this.log(`moved ${staleIDs.length} stale generated attachment(s) to Zotero trash: ${prefix}`);
+    }
+  },
+
+  async ensureAttachmentFilename(attachment, expectedName) {
+    let path = await attachment.getFilePathAsync();
+    if (!path) {
+      throw this.err("E_OUTPUT_PATH", "Zotero 已导入译文，但无法读取其存储文件路径。");
+    }
+    if (PathUtils.filename(path) !== expectedName) {
+      const renamed = await attachment.renameAttachmentFile(expectedName, false, false);
+      if (renamed !== true) {
+        throw this.err(
+          "E_OUTPUT_PATH",
+          "Zotero 导入时更改了译文文件名，且无法恢复预期名称。\n预期：" +
+            expectedName +
+            "\n当前：" +
+            PathUtils.filename(path)
+        );
+      }
+      path = await attachment.getFilePathAsync();
+    }
+    if (!path || PathUtils.filename(path) !== expectedName) {
+      throw this.err(
+        "E_OUTPUT_PATH",
+        "Zotero 存储的译文文件名与输出文件名不一致。\n预期：" +
+          expectedName +
+          "\n当前：" +
+          (path ? PathUtils.filename(path) : "(无法读取)")
+      );
+    }
+    return path;
+  },
+
   async openComparison(win, prefer) {
-    let targets;
+    if (this._job) {
+      this.alert("原文与译文", "已有插件任务正在进行。请等待完成或先取消当前任务。", win);
+      return;
+    }
+    let cfgPath = null;
+    let progressWindow = null;
+    let prog = null;
     try {
-      targets = await this.collectTargets(win, prefer);
+      let targets = await this.collectTargets(win, prefer);
       if (!targets.length && prefer === "reader") {
         const current = this.getReaderAttachment(win);
         if (current) targets = [current];
@@ -303,31 +367,109 @@ var FTT = {
         throw new Error("未找到对应译文 PDF。请先完成翻译，并将译文作为 Zotero 子附件导入。");
       }
 
-      const originalReader = await Zotero.Reader.open(pair.original.id, null, { openInWindow: true });
-      const translatedReader = await Zotero.Reader.open(pair.translated.id, null, { openInWindow: true });
-      if (originalReader && originalReader._initPromise) await originalReader._initPromise;
-      if (translatedReader && translatedReader._initPromise) await translatedReader._initPromise;
-      const originalWindow = originalReader && originalReader._window;
-      const translatedWindow = translatedReader && translatedReader._window;
-      if (!originalWindow || !translatedWindow || originalWindow === translatedWindow) {
-        throw new Error("Zotero 已尝试打开两份 PDF，但无法取得两个独立阅读器窗口以自动并排排列。");
+      const parent = Zotero.Items.get(pair.original.parentItemID);
+      if (!parent) throw new Error("无法找到论文条目，不能保存对照 PDF。");
+      const title = parent.getDisplayTitle() || pair.original.getDisplayTitle() || "未命名论文";
+      const originalPath = await pair.original.getFilePathAsync();
+      const translatedPath = await pair.translated.getFilePathAsync();
+      if (!originalPath || !translatedPath) {
+        throw this.err("E_NOFILE", "原文或译文 PDF 文件不存在（可能尚未同步下载），请先在 Zotero 中打开对应 PDF。");
       }
 
-      const screen = originalWindow.screen;
-      if (!screen || !Number.isFinite(screen.availWidth) || !Number.isFinite(screen.availHeight)) {
-        throw new Error("无法读取屏幕可用尺寸，不能自动排列阅读器窗口。");
+      if (!this.enginePath) await this.deployEngine();
+      const py = await this.findPython();
+      const comparisonTitle = this.COMPARISON_PREFIX + title;
+      let comparison = null;
+      let outPath = null;
+      for (const id of parent.getAttachments()) {
+        const attachment = Zotero.Items.get(id);
+        if (
+          attachment &&
+          attachment.isPDFAttachment() &&
+          attachment.getField("title") === comparisonTitle &&
+          attachment.attachmentLinkMode === Zotero.Attachments.LINK_MODE_LINKED_FILE
+        ) {
+          outPath = await attachment.getFilePathAsync();
+          if (outPath) {
+            comparison = attachment;
+            break;
+          }
+        }
       }
-      const left = screen.availLeft || 0;
-      const top = screen.availTop || 0;
-      const width = Math.floor(screen.availWidth / 2);
-      const height = screen.availHeight;
-      originalWindow.resizeTo(width, height);
-      translatedWindow.resizeTo(width, height);
-      originalWindow.moveTo(left, top);
-      translatedWindow.moveTo(left + width, top);
+      const outDirPref = (this.getPref("outputDir") || "").trim();
+      const outDir = outDirPref || PathUtils.join(Zotero.DataDirectory.dir, "translated-pdfs");
+      await IOUtils.makeDirectory(outDir, { createAncestors: true });
+      if (!outPath) {
+        const base = Zotero.File.getValidFileName(PathUtils.filename(originalPath).replace(/\.pdf$/i, ""));
+        outPath = await this.uniquePath(outDir, base, ".comparison.pdf");
+      }
+
+      progressWindow = new Zotero.ProgressWindow({ closeOnClick: true });
+      progressWindow.changeHeadline("原文与译文对照");
+      prog = new progressWindow.ItemProgress(pair.original.getImageSrc ? pair.original.getImageSrc() : "", title);
+      prog.setProgress(0);
+      progressWindow.show();
+      const job = { cancelled: false, proc: null };
+      this._job = job;
+      cfgPath = PathUtils.join(this.workDir, "compare-" + Date.now() + ".json");
+      await IOUtils.writeUTF8(cfgPath, JSON.stringify({ input: originalPath, translated_input: translatedPath, output: outPath }));
+
+      let doneEvent = null;
+      let errEvent = null;
+      const result = await this.runEngine(py, cfgPath, ["--compare"], job, (ev) => {
+        if (ev.type === "progress") {
+          prog.setProgress(Math.min(95, Math.round((ev.page / ev.total) * 95)));
+          prog.setText(`${title} — ${ev.message}`);
+        } else if (ev.type === "log") {
+          this.log("engine: " + ev.message);
+        } else if (ev.type === "done") {
+          doneEvent = ev;
+        } else if (ev.type === "error") {
+          errEvent = ev;
+        }
+      });
+      if (job.cancelled) {
+        prog.setError();
+        prog.setText(`${title} — 已取消`);
+        progressWindow.startCloseTimer(4000);
+        return;
+      }
+      if (errEvent) throw this.err(errEvent.code, errEvent.message, errEvent.trace);
+      if (result.exitCode !== 0 || !doneEvent) {
+        throw this.err("E_COMPARE", "对照 PDF 生成失败（exit " + result.exitCode + "）。\n" + result.tail.slice(-8).join("\n"));
+      }
+
+      if (!comparison) {
+        comparison = await Zotero.Attachments.linkFromFile({
+          file: outPath,
+          parentItemID: parent.id,
+          title: comparisonTitle,
+          contentType: "application/pdf",
+        });
+      }
+      await this.keepLatestGeneratedAttachment(parent, this.COMPARISON_PREFIX, comparison.id);
+      await this.keepLatestGeneratedAttachment(parent, this.TRANSLATED_PREFIX, pair.translated.id);
+      prog.setProgress(100);
+      prog.setText(`${title} — 正在打开单窗口对照阅读器`);
+      progressWindow.startCloseTimer(5000);
+      await Zotero.Reader.open(comparison.id, null, { openInWindow: true });
     } catch (e) {
       this.log("openComparison failed: " + (e.stack || e));
+      if (prog) {
+        prog.setError();
+        prog.setText("原文与译文对照 — 失败");
+        progressWindow.startCloseTimer(12000);
+      }
       this.alert("原文与译文", this.explain(e), win);
+    } finally {
+      this._job = null;
+      if (cfgPath) {
+        try {
+          await IOUtils.remove(cfgPath, { ignoreAbsent: true });
+        } catch (e) {
+          this.log("temporary comparison config cleanup failed: " + e);
+        }
+      }
     }
   },
 
@@ -512,7 +654,12 @@ var FTT = {
       await IOUtils.makeDirectory(outDir, { createAncestors: true });
       const mode = this.getPref("mode") || "replace";
       const base = Zotero.File.getValidFileName(PathUtils.filename(inPath).replace(/\.pdf$/i, ""));
-      const outPath = await this.uniquePath(outDir, base, mode === "bilingual" ? ".zh-bilingual.pdf" : ".zh.pdf");
+      const outputSuffix = mode === "bilingual" ? "_zh-bilingual.pdf" : "_zh.pdf";
+      const outPath = await this.uniquePath(outDir, base, outputSuffix);
+      if (!PathUtils.filename(outPath).toLowerCase().endsWith(outputSuffix)) {
+        throw this.err("E_OUTPUT_PATH", "生成的译文文件名未保留预期后缀：" + outPath);
+      }
+      this.log("translation output path: " + outPath);
 
       const cfg = this.buildConfig(inPath, outPath, att.key);
       cfgPath = PathUtils.join(this.workDir, "job-" + Date.now() + ".json");
@@ -549,6 +696,16 @@ var FTT = {
           "翻译引擎异常退出（exit " + result.exitCode + "）。\n" + result.tail.slice(-8).join("\n")
         );
       }
+      const normalizePath = (path) => String(path || "").replace(/[\\/]+/g, "\\").toLowerCase();
+      if (normalizePath(doneEvent.output) !== normalizePath(outPath) || !(await IOUtils.exists(outPath))) {
+        throw this.err(
+          "E_OUTPUT_PATH",
+          "翻译引擎报告的输出路径与预期不一致，或文件未生成。\n预期：" +
+            outPath +
+            "\n引擎：" +
+            (doneEvent.output || "(无)")
+        );
+      }
 
       // 导入 Zotero
       prog.setProgress(98);
@@ -559,11 +716,15 @@ var FTT = {
       if (attachMode === "import") {
         newAtt = await Zotero.Attachments.importFromFile({
           file: outPath,
+          fileBaseName: PathUtils.filename(outPath).replace(/\.pdf$/i, ""),
           libraryID: att.libraryID,
           parentItemID,
           title: attTitle,
           contentType: "application/pdf",
         });
+        if (newAtt) {
+          await this.ensureAttachmentFilename(newAtt, PathUtils.filename(outPath));
+        }
       } else if (attachMode === "link") {
         newAtt = await Zotero.Attachments.linkFromFile({
           file: outPath,
@@ -571,6 +732,10 @@ var FTT = {
           title: attTitle,
           contentType: "application/pdf",
         });
+      }
+      if (newAtt && parent) {
+        await this.keepLatestGeneratedAttachment(parent, this.TRANSLATED_PREFIX, newAtt.id);
+        await this.keepLatestGeneratedAttachment(parent, this.COMPARISON_PREFIX, null);
       }
 
       const s = doneEvent.summary || {};
@@ -580,6 +745,10 @@ var FTT = {
         `已翻译 ${s.blocks_translated} 段，跳过 ${s.blocks_skipped}，失败 ${s.blocks_failed}；` +
           `缩小排版 ${s.shrunk}，仍溢出 ${s.overflow}；用时 ${s.seconds}s，${s.size_mb} MB`
       );
+      pw.addDescription("译文文件：" + outPath);
+      if (newAtt && attachMode === "import") {
+        pw.addDescription("Zotero 存储文件：" + (await newAtt.getFilePathAsync()));
+      }
       if (cfg.debug) pw.addDescription("诊断文件：" + outPath + ".debug.json");
       pw.startCloseTimer(10000);
 
